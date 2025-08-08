@@ -22,7 +22,6 @@ import com.google.firebase.database.DatabaseReference;
 import com.google.firebase.database.FirebaseDatabase;
 import com.google.firebase.storage.FirebaseStorage;
 import com.google.firebase.storage.StorageReference;
-import java.io.ByteArrayOutputStream;
 import java.io.File;
 import java.io.FileOutputStream;
 import java.io.IOException;
@@ -31,7 +30,7 @@ import java.util.Map;
 
 public class MainActivity extends AppCompatActivity {
     private ImageView imageView;
-    private Button btnTakePhoto, btnSubmit;
+    private Button btnTakePhoto, btnSubmit, btnSendEmail;
     private TextView coordinates;
     private Uri imageUri;
     private double latitude = 0, longitude = 0;
@@ -49,28 +48,38 @@ public class MainActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_main);
 
-        // Initialize views
         imageView = findViewById(R.id.imageView);
         btnTakePhoto = findViewById(R.id.btnTakePhoto);
         btnSubmit = findViewById(R.id.btnSubmit);
+        btnSendEmail = findViewById(R.id.btnSendEmail);
         coordinates = findViewById(R.id.coordinates);
 
-        // Initialize Firebase and Location services
         fusedLocationClient = LocationServices.getFusedLocationProviderClient(this);
         mAuth = FirebaseAuth.getInstance();
+
+        if (mAuth.getCurrentUser() == null) {
+            startActivity(new Intent(this, LoginActivity.class));
+            finish();
+            return;
+        }
+
         storageRef = FirebaseStorage.getInstance().getReference();
         dbRef = FirebaseDatabase.getInstance().getReference("uploads")
                 .child(mAuth.getCurrentUser().getUid());
 
-        // Set click listeners
+        btnSendEmail.setEnabled(false);
+        btnSubmit.setEnabled(false);
+
         btnTakePhoto.setOnClickListener(v -> checkPermissionsAndTakePhoto());
         btnSubmit.setOnClickListener(v -> submitData());
+        btnSendEmail.setOnClickListener(v -> sendEmailWithPhoto());
     }
 
     private void checkPermissionsAndTakePhoto() {
-        String[] permissions = {
+        String[] permissions = new String[] {
                 Manifest.permission.CAMERA,
-                Manifest.permission.ACCESS_FINE_LOCATION
+                Manifest.permission.ACCESS_FINE_LOCATION,
+                Manifest.permission.ACCESS_COARSE_LOCATION
         };
 
         boolean allPermissionsGranted = true;
@@ -115,9 +124,6 @@ public class MainActivity extends AppCompatActivity {
         if (takePictureIntent.resolveActivity(getPackageManager()) != null) {
             startActivityForResult(takePictureIntent, REQUEST_IMAGE_CAPTURE);
         }
-
-        // Get current location
-        getCurrentLocation();
     }
 
     private void getCurrentLocation() {
@@ -131,8 +137,7 @@ public class MainActivity extends AppCompatActivity {
                     if (location != null) {
                         latitude = location.getLatitude();
                         longitude = location.getLongitude();
-                        coordinates.setText(String.format("Location: %.6f, %.6f",
-                                latitude, longitude));
+                        coordinates.setText(String.format("Location: %.6f, %.6f", latitude, longitude));
                     } else {
                         coordinates.setText("Location: Unable to get location");
                     }
@@ -144,25 +149,33 @@ public class MainActivity extends AppCompatActivity {
         super.onActivityResult(requestCode, resultCode, data);
         if (requestCode == REQUEST_IMAGE_CAPTURE && resultCode == RESULT_OK) {
             Bundle extras = data.getExtras();
-            Bitmap imageBitmap = (Bitmap) extras.get("data");
-            imageView.setImageBitmap(imageBitmap);
+            Bitmap imageBitmap = (Bitmap) (extras != null ? extras.get("data") : null);
+            if (imageBitmap == null) {
+                Toast.makeText(this, "No image captured", Toast.LENGTH_SHORT).show();
+                return;
+            }
 
-            // Save bitmap to file and get URI
+            imageView.setImageBitmap(imageBitmap);
             saveImageAndGetUri(imageBitmap);
 
-            // Enable submit button
+            // Fetch location after capture for freshness
+            getCurrentLocation();
+
             btnSubmit.setEnabled(true);
+            btnSendEmail.setEnabled(true);
         }
     }
 
     private void saveImageAndGetUri(Bitmap bitmap) {
         try {
-            File tempFile = new File(getExternalCacheDir(), "temp_photo_" +
-                    System.currentTimeMillis() + ".jpg");
+            File tempFile = new File(getCacheDir(), "temp_photo_" + System.currentTimeMillis() + ".jpg");
             FileOutputStream out = new FileOutputStream(tempFile);
             bitmap.compress(Bitmap.CompressFormat.JPEG, 90, out);
             out.close();
-            imageUri = Uri.fromFile(tempFile);
+            imageUri = androidx.core.content.FileProvider.getUriForFile(
+                    this,
+                    getPackageName() + ".fileprovider",
+                    tempFile);
         } catch (IOException e) {
             e.printStackTrace();
             Toast.makeText(this, "Error saving image", Toast.LENGTH_SHORT).show();
@@ -177,23 +190,14 @@ public class MainActivity extends AppCompatActivity {
 
         Toast.makeText(this, "Uploading...", Toast.LENGTH_SHORT).show();
 
-        // Create a reference to store the image
-        StorageReference photoRef = storageRef.child("photos/" +
-                System.currentTimeMillis() + ".jpg");
+        StorageReference photoRef = storageRef.child("photos/" + System.currentTimeMillis() + ".jpg");
 
-        // Upload image to Firebase Storage
         photoRef.putFile(imageUri)
-                .addOnSuccessListener(taskSnapshot -> {
-                    // Get download URL
-                    photoRef.getDownloadUrl().addOnSuccessListener(downloadUri -> {
-                        // Save data to Realtime Database
-                        saveToDatabase(downloadUri.toString());
-                    });
-                })
-                .addOnFailureListener(e -> {
-                    Toast.makeText(MainActivity.this, "Upload failed: " +
-                            e.getMessage(), Toast.LENGTH_SHORT).show();
-                });
+                .addOnSuccessListener(taskSnapshot ->
+                        photoRef.getDownloadUrl().addOnSuccessListener(downloadUri ->
+                                saveToDatabase(downloadUri.toString())))
+                .addOnFailureListener(e ->
+                        Toast.makeText(MainActivity.this, "Upload failed: " + e.getMessage(), Toast.LENGTH_SHORT).show());
     }
 
     private void saveToDatabase(String photoUrl) {
@@ -208,21 +212,42 @@ public class MainActivity extends AppCompatActivity {
 
         dbRef.child(uploadId).setValue(uploadData)
                 .addOnSuccessListener(aVoid -> {
-                    Toast.makeText(MainActivity.this,
-                            "Data submitted successfully!", Toast.LENGTH_SHORT).show();
-                    // Reset UI
+                    Toast.makeText(MainActivity.this, "Data submitted successfully!", Toast.LENGTH_SHORT).show();
                     resetUI();
                 })
-                .addOnFailureListener(e -> {
-                    Toast.makeText(MainActivity.this, "Database error: " +
-                            e.getMessage(), Toast.LENGTH_SHORT).show();
-                });
+                .addOnFailureListener(e ->
+                        Toast.makeText(MainActivity.this, "Database error: " + e.getMessage(), Toast.LENGTH_SHORT).show());
+    }
+
+    private void sendEmailWithPhoto() {
+        if (imageUri == null) {
+            Toast.makeText(this, "No photo to send", Toast.LENGTH_SHORT).show();
+            return;
+        }
+
+        String subject = "Photo and Location from My App";
+        String body = String.format("Here is the photo and location:\nLatitude: %.6f\nLongitude: %.6f",
+                latitude, longitude);
+
+        Intent emailIntent = new Intent(Intent.ACTION_SEND);
+        emailIntent.setType("image/jpeg");
+        emailIntent.putExtra(Intent.EXTRA_SUBJECT, subject);
+        emailIntent.putExtra(Intent.EXTRA_TEXT, body);
+        emailIntent.putExtra(Intent.EXTRA_STREAM, imageUri);
+        emailIntent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+
+        try {
+            startActivity(Intent.createChooser(emailIntent, "Send email using:"));
+        } catch (android.content.ActivityNotFoundException ex) {
+            Toast.makeText(this, "No email clients installed.", Toast.LENGTH_SHORT).show();
+        }
     }
 
     private void resetUI() {
         imageView.setImageResource(android.R.color.darker_gray);
         coordinates.setText("Location: Not captured");
         btnSubmit.setEnabled(false);
+        btnSendEmail.setEnabled(false);
         imageUri = null;
         latitude = 0;
         longitude = 0;

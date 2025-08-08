@@ -1,4 +1,5 @@
 package com.example.p8;
+
 import android.content.Intent;
 import android.os.Bundle;
 import android.widget.Button;
@@ -18,24 +19,20 @@ public class LoginActivity extends AppCompatActivity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_login);
 
-        // Initialize Firebase Auth
         mAuth = FirebaseAuth.getInstance();
 
-        // Check if user is already logged in
         if (mAuth.getCurrentUser() != null) {
             startActivity(new Intent(this, MainActivity.class));
             finish();
             return;
         }
 
-        // Initialize views
         email = findViewById(R.id.email);
         password = findViewById(R.id.password);
         loginBtn = findViewById(R.id.loginBtn);
         signupBtn = findViewById(R.id.signupBtn);
         status = findViewById(R.id.status);
 
-        // Set click listeners
         loginBtn.setOnClickListener(v -> loginUser());
         signupBtn.setOnClickListener(v -> signUpUser());
     }
